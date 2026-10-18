@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            cmake_args: -G Ninja
+          - name: macOS
+            os: macos-14
+            cmake_args: -G Ninja -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+          - name: Windows
+            os: windows-2022
+            cmake_args: -G "Visual Studio 17 2022" -A x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxext-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: DSP tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Collect artefacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp -R build/GoodReverb_artefacts/Release/VST3 dist/ 2>/dev/null || true
+          cp -R build/GoodReverb_artefacts/Release/AU dist/ 2>/dev/null || true
+          cp -R build/GoodReverb_artefacts/Release/LV2 dist/ 2>/dev/null || true
+          cp -R build/GoodReverb_artefacts/Release/Standalone dist/ 2>/dev/null || true
+          cp README.md LICENSE dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoodReverb-${{ matrix.name }}
+          path: dist
