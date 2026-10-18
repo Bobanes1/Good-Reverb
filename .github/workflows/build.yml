@@ -2,8 +2,22 @@ name: Build
 
 on:
   push:
+    branches: ['**'] # tags are built by release.yml
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Version used in the package names
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  PLUGINVAL_VERSION: v1.0.4
 
 jobs:
   build:
@@ -23,6 +37,10 @@ jobs:
             os: windows-2022
             cmake_args: -G "Visual Studio 17 2022" -A x64
 
+    env:
+      ARTEFACTS: build/GoodReverb_artefacts/Release
+      PACKAGE: GoodReverb-${{ inputs.version || 'dev' }}-${{ matrix.name }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +48,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
+          sudo apt-get install -y ninja-build xvfb zip libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxext-dev libxcomposite-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
 
       - name: Install Ninja (macOS)
@@ -46,17 +64,70 @@ jobs:
       - name: DSP tests
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Collect artefacts
+      # Unsigned bundles get an ad-hoc signature so Apple Silicon hosts will load them.
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for bundle in "$ARTEFACTS/VST3/Good Reverb.vst3" "$ARTEFACTS/AU/Good Reverb.component" "$ARTEFACTS/Standalone/Good Reverb.app"; do
+            codesign --force --deep --sign - "$bundle"
+            codesign --verify --deep --strict "$bundle"
+          done
+
+      - name: pluginval (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -sSfL -o pluginval.zip "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_Linux.zip"
+          unzip -q pluginval.zip
+          xvfb-run -a ./pluginval --strictness-level 10 --validate-in-process --timeout-ms 600000 --validate "$ARTEFACTS/VST3/Good Reverb.vst3"
+
+      - name: pluginval (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -sSfL -o pluginval.zip "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_macOS.zip"
+          unzip -q pluginval.zip
+          ./pluginval.app/Contents/MacOS/pluginval --strictness-level 10 --validate-in-process --timeout-ms 600000 --validate "$ARTEFACTS/VST3/Good Reverb.vst3"
+
+      - name: pluginval (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/download/$env:PLUGINVAL_VERSION/pluginval_Windows.zip" -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath .
+          ./pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 600000 --validate "$env:ARTEFACTS/VST3/Good Reverb.vst3"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Zips are made on each runner so executable bits and bundle structure survive
+      # (upload-artifact does not preserve file permissions).
+      - name: Stage package
         shell: bash
         run: |
-          mkdir -p dist
-          cp -R build/GoodReverb_artefacts/Release/VST3 dist/ 2>/dev/null || true
-          cp -R build/GoodReverb_artefacts/Release/AU dist/ 2>/dev/null || true
-          cp -R build/GoodReverb_artefacts/Release/LV2 dist/ 2>/dev/null || true
-          cp -R build/GoodReverb_artefacts/Release/Standalone dist/ 2>/dev/null || true
-          cp README.md LICENSE dist/
+          set -euo pipefail
+          mkdir -p "$PACKAGE"
+          copy() { [ -e "$ARTEFACTS/$1" ] || { echo "::error::missing $ARTEFACTS/$1"; exit 1; }; cp -R "$ARTEFACTS/$1" "$PACKAGE/"; }
+          copy "VST3/Good Reverb.vst3"
+          case "$RUNNER_OS" in
+            Linux)   copy "LV2/Good Reverb.lv2"; copy "Standalone/Good Reverb" ;;
+            macOS)   copy "AU/Good Reverb.component"; copy "Standalone/Good Reverb.app" ;;
+            Windows) copy "Standalone/Good Reverb.exe" ;;
+          esac
+          cp README.md LICENSE CHANGELOG.md "$PACKAGE/"
+          ls -la "$PACKAGE"
+
+      - name: Zip (Linux)
+        if: runner.os == 'Linux'
+        run: zip -qry "$PACKAGE.zip" "$PACKAGE"
+
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "$PACKAGE" "$PACKAGE.zip"
+
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "$env:PACKAGE" -DestinationPath "$env:PACKAGE.zip"
 
       - uses: actions/upload-artifact@v4
         with:
           name: GoodReverb-${{ matrix.name }}
-          path: dist
+          path: ${{ env.PACKAGE }}.zip
+          if-no-files-found: error

@@ -70,6 +70,12 @@ in ─► predelay ─► early diffusion (4 allpasses/ch) ─┬─► early re
 
 The DSP lives in `Source/dsp/` and is plain C++17 with no JUCE dependency.
 
+## Download
+
+Prebuilt plugins for Windows, macOS (universal) and Linux are on the
+[Releases page](https://github.com/Bobanes1/Good-Reverb/releases). Unzip, copy the plugin into
+your plugin folder (see the table under [Building](#building)) and rescan in your DAW.
+
 ## Building
 
 Requirements: CMake 3.22+, a C++17 compiler. JUCE 8.0.4 is downloaded automatically. Alternatively,
@@ -96,9 +102,18 @@ Built plugins end up in `build/GoodReverb_artefacts/Release/`. Copy them into yo
 | AU     | — | `~/Library/Audio/Plug-Ins/Components` | — |
 | LV2    | — | — | `~/.lv2` |
 
-Every push also builds Windows, macOS (universal) and Linux binaries on GitHub Actions. Download
-them from the run's **Artifacts** section. The macOS builds are unsigned, so you may need to run
-`xattr -cr "Good Reverb.vst3"` (or `.component`) before your DAW will load them.
+Every push also builds, tests and pluginval-validates Windows, macOS (universal) and Linux binaries
+on GitHub Actions. Download them from the run's **Artifacts** section. The macOS builds are ad-hoc
+signed but not notarized, so you may need to run `xattr -cr "Good Reverb.vst3"` (or `.component`)
+before your DAW will load them.
+
+### Making a release
+
+1. Bump `VERSION` in `CMakeLists.txt` and add a `## vX.Y` section to `CHANGELOG.md`.
+2. Push a matching tag, for example `git tag v0.2 && git push origin v0.2`.
+
+The **Release** workflow checks the version, builds and validates all three platforms, and
+publishes a GitHub release with the zips, checksums and the changelog section as release notes.
 
 To build only the DSP and tests (no JUCE download): `-DGOOD_REVERB_BUILD_PLUGIN=OFF`.
 

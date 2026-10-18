@@ -1,0 +1,109 @@
+name: Release
+
+# Push a tag like v0.1 (matching the project VERSION in CMakeLists.txt and a
+# "## v0.1" section in CHANGELOG.md) to build, validate and publish a release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches CMake version and CHANGELOG
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          project=$(sed -nE 's/^project\(GoodReverb VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+          norm() { local v="$1"; while [ "$(tr -cd . <<< "$v" | wc -c)" -lt 2 ]; do v="$v.0"; done; echo "$v"; }
+          if [ "$(norm "$tag")" != "$(norm "$project")" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the CMake project version $project"
+            exit 1
+          fi
+          if ! grep -qE "^## ${GITHUB_REF_NAME//./\\.}( |$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## $GITHUB_REF_NAME' section"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+
+  publish:
+    name: Publish release
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: GoodReverb-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        run: |
+          set -euo pipefail
+          ls -la dist
+          [ "$(ls dist/*.zip | wc -l)" -eq 3 ] || { echo "::error::expected 3 packages"; exit 1; }
+          (cd dist && sha256sum *.zip > SHA256SUMS.txt)
+
+          awk -v tag="$GITHUB_REF_NAME" '
+            index($0, "## " tag) == 1 && (length($0) == length(tag) + 3 || substr($0, length(tag) + 4, 1) == " ") { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::empty release notes"; exit 1; }
+
+          cat >> notes.md << 'EOF'
+
+          ## Downloads
+
+          | File | Contents |
+          |------|----------|
+          | `GoodReverb-*-Windows.zip` | VST3, Standalone (.exe) |
+          | `GoodReverb-*-macOS.zip` | VST3, AU, Standalone (.app). Universal: Apple Silicon and Intel, macOS 10.13+ |
+          | `GoodReverb-*-Linux.zip` | VST3, LV2, Standalone |
+
+          ## Installing
+
+          Unzip, then copy the plugin into your plugin folder and rescan in your DAW:
+
+          - **Windows:** `Good Reverb.vst3` → `C:\Program Files\Common Files\VST3`
+          - **macOS:** `Good Reverb.vst3` → `~/Library/Audio/Plug-Ins/VST3`, `Good Reverb.component` → `~/Library/Audio/Plug-Ins/Components`
+          - **Linux:** `Good Reverb.vst3` → `~/.vst3`, `Good Reverb.lv2` → `~/.lv2`
+
+          The macOS builds are ad-hoc signed but not notarized. If macOS says the plugin is damaged or
+          can't be opened, remove the quarantine flag and rescan:
+
+          ```
+          xattr -cr ~/Library/Audio/Plug-Ins/VST3/"Good Reverb.vst3" ~/Library/Audio/Plug-Ins/Components/"Good Reverb.component"
+          ```
+
+          Checksums are in `SHA256SUMS.txt`.
+          EOF
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Good Reverb ${{ github.ref_name }}
+          body_path: notes.md
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
