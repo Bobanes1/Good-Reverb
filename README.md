@@ -110,7 +110,9 @@ before your DAW will load them.
 ### Making a release
 
 1. Bump `VERSION` in `CMakeLists.txt` and add a `## vX.Y` section to `CHANGELOG.md`.
-2. Push a matching tag, for example `git tag v0.2 && git push origin v0.2`.
+2. Push a matching tag, for example `git tag v0.2 && git push origin v0.2`. Or, on GitHub, open
+   **Actions → Release → Run workflow**, pick the branch and enter the tag (`v0.2`): the workflow
+   creates the tag on that branch's latest commit.
 
 The **Release** workflow checks the version, builds and validates all three platforms, and
 publishes a GitHub release with the zips, checksums and the changelog section as release notes.

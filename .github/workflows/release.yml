@@ -2,12 +2,23 @@ name: Release
 
 # Push a tag like v0.1 (matching the project VERSION in CMakeLists.txt and a
 # "## v0.1" section in CHANGELOG.md) to build, validate and publish a release.
+# Or run this workflow by hand from the Actions tab and give it the tag name:
+# the tag is then created on the commit the workflow runs from.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create, e.g. v0.1
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   check:
@@ -22,15 +33,19 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "::error::Release tag '$RELEASE_TAG' must start with v, e.g. v0.1"
+            exit 1
+          fi
+          tag="${RELEASE_TAG#v}"
           project=$(sed -nE 's/^project\(GoodReverb VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
           norm() { local v="$1"; while [ "$(tr -cd . <<< "$v" | wc -c)" -lt 2 ]; do v="$v.0"; done; echo "$v"; }
           if [ "$(norm "$tag")" != "$(norm "$project")" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match the CMake project version $project"
+            echo "::error::Tag $RELEASE_TAG does not match the CMake project version $project"
             exit 1
           fi
-          if ! grep -qE "^## ${GITHUB_REF_NAME//./\\.}( |$)" CHANGELOG.md; then
-            echo "::error::CHANGELOG.md has no '## $GITHUB_REF_NAME' section"
+          if ! grep -qE "^## ${RELEASE_TAG//./\\.}( |$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## $RELEASE_TAG' section"
             exit 1
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
@@ -63,7 +78,7 @@ jobs:
           [ "$(ls dist/*.zip | wc -l)" -eq 3 ] || { echo "::error::expected 3 packages"; exit 1; }
           (cd dist && sha256sum *.zip > SHA256SUMS.txt)
 
-          awk -v tag="$GITHUB_REF_NAME" '
+          awk -v tag="$RELEASE_TAG" '
             index($0, "## " tag) == 1 && (length($0) == length(tag) + 3 || substr($0, length(tag) + 4, 1) == " ") { found = 1; next }
             found && /^## / { exit }
             found { print }
@@ -101,7 +116,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          name: Good Reverb ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Good Reverb ${{ env.RELEASE_TAG }}
           body_path: notes.md
           files: |
             dist/*.zip
