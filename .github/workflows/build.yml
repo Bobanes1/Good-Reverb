@@ -73,28 +73,24 @@ jobs:
             codesign --verify --deep --strict "$bundle"
           done
 
-      - name: pluginval (Linux)
-        if: runner.os == 'Linux'
+      # Runs from bash on every OS: PowerShell does not wait for GUI-subsystem programs
+      # like pluginval.exe, which silently skipped the exit-code check. The log must also
+      # end with pluginval's SUCCESS line so a lost exit code can't pass the step.
+      - name: pluginval
+        shell: bash
         run: |
-          curl -sSfL -o pluginval.zip "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_Linux.zip"
-          unzip -q pluginval.zip
-          xvfb-run -a ./pluginval --strictness-level 10 --validate-in-process --timeout-ms 600000 --validate "$ARTEFACTS/VST3/Good Reverb.vst3"
-
-      - name: pluginval (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          curl -sSfL -o pluginval.zip "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/pluginval_macOS.zip"
-          unzip -q pluginval.zip
-          ./pluginval.app/Contents/MacOS/pluginval --strictness-level 10 --validate-in-process --timeout-ms 600000 --validate "$ARTEFACTS/VST3/Good Reverb.vst3"
-
-      - name: pluginval (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/download/$env:PLUGINVAL_VERSION/pluginval_Windows.zip" -OutFile pluginval.zip
-          Expand-Archive pluginval.zip -DestinationPath .
-          ./pluginval.exe --strictness-level 10 --validate-in-process --timeout-ms 600000 --validate "$env:ARTEFACTS/VST3/Good Reverb.vst3"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          set -euo pipefail
+          wrap=""
+          case "$RUNNER_OS" in
+            Linux)   asset=pluginval_Linux.zip;   bin=./pluginval; wrap="xvfb-run -a" ;;
+            macOS)   asset=pluginval_macOS.zip;   bin=./pluginval.app/Contents/MacOS/pluginval ;;
+            Windows) asset=pluginval_Windows.zip; bin=./pluginval.exe ;;
+          esac
+          curl -sSfL -o pluginval.zip "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/${asset}"
+          if [ "$RUNNER_OS" = Windows ]; then 7z x -y pluginval.zip > /dev/null; else unzip -q -o pluginval.zip; fi
+          $wrap "$bin" --strictness-level 10 --validate-in-process --timeout-ms 600000 \
+            --validate "$ARTEFACTS/VST3/Good Reverb.vst3" 2>&1 | tee pluginval.log
+          grep -q '^SUCCESS' pluginval.log || { echo "::error::pluginval did not report SUCCESS"; exit 1; }
 
       # Zips are made on each runner so executable bits and bundle structure survive
       # (upload-artifact does not preserve file permissions).
