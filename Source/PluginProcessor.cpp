@@ -17,18 +17,39 @@ juce::String formatHz (float hz)
     return hz >= 1000.0f ? juce::String (hz / 1000.0f, hz >= 10000.0f ? 1 : 2) + " kHz" : juce::String (juce::roundToInt (hz)) + " Hz";
 }
 
+// Typed values like "nan" or "inf" must never reach the parameter (they'd poison the engine).
+float finiteOr (float v, float fallback) { return std::isfinite (v) ? v : fallback; }
+
+float parseNumber (const juce::String& text) { return finiteOr (text.trim().getFloatValue(), 0.0f); }
+
 float parseHz (const juce::String& text)
 {
     const auto t = text.trim().toLowerCase();
-    const float v = t.getFloatValue();
+    const float v = parseNumber (t);
     return t.containsChar ('k') ? v * 1000.0f : v;
+}
+
+// Decay accepts "2.5", "2.5 s" or "800 ms".
+float parseSeconds (const juce::String& text)
+{
+    const auto t = text.trim().toLowerCase();
+    const float v = parseNumber (t);
+    return t.contains ("ms") ? v * 0.001f : v;
+}
+
+// Predelay accepts "40", "40 ms" or "0.25 s".
+float parseMilliseconds (const juce::String& text)
+{
+    const auto t = text.trim().toLowerCase();
+    const float v = parseNumber (t);
+    return (t.endsWithChar ('s') && ! t.contains ("ms")) ? v * 1000.0f : v;
 }
 
 juce::AudioParameterFloatAttributes withText (std::function<juce::String (float, int)> toText,
                                               std::function<float (const juce::String&)> fromText = nullptr)
 {
     if (! fromText)
-        fromText = [] (const juce::String& t) { return t.getFloatValue(); };
+        fromText = parseNumber;
     return juce::AudioParameterFloatAttributes().withStringFromValueFunction (std::move (toText)).withValueFromStringFunction (std::move (fromText));
 }
 
@@ -117,8 +138,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout GoodReverbProcessor::createL
     auto dbText = [] (float v, int) { return juce::String (v, 1) + " dB"; };
 
     addFloat (mix, "Mix", Range (0.0f, 100.0f, 0.1f), 35.0f, withText (percentText));
-    addFloat (predelay, "Predelay", skewed (0.0f, 500.0f, 60.0f, 0.1f), 10.0f, withText (msText));
-    addFloat (decay, "Decay", skewed (0.2f, 30.0f, 3.0f, 0.01f), 2.5f, withText (secText));
+    addFloat (predelay, "Predelay", skewed (0.0f, 500.0f, 60.0f, 0.1f), 10.0f, withText (msText, parseMilliseconds));
+    addFloat (decay, "Decay", skewed (0.2f, 30.0f, 3.0f, 0.01f), 2.5f, withText (secText, parseSeconds));
     addFloat (size, "Size", Range (0.0f, 100.0f, 0.1f), 60.0f, withText (percentText));
     addFloat (attack, "Attack", Range (0.0f, 100.0f, 0.1f), 40.0f, withText (percentText));
     addFloat (earlyDiff, "Early Diffusion", Range (0.0f, 100.0f, 0.1f), 70.0f, withText (percentText));
@@ -147,6 +168,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout GoodReverbProcessor::createL
 gr::ReverbParams GoodReverbProcessor::currentParams() const
 {
     gr::ReverbParams p;
+    const gr::ReverbParams defaults;
     p.mix = raw.mix->load() * 0.01f;
     p.predelayMs = raw.predelay->load();
     p.decaySeconds = raw.decay->load();
@@ -163,6 +185,24 @@ gr::ReverbParams GoodReverbProcessor::currentParams() const
     p.highShelfDb = raw.highShelf->load();
     p.highFreqHz = raw.highFreq->load();
     p.width = raw.width->load() * 0.01f;
+    // A corrupted project or host value must not reach the engine as NaN/inf.
+    auto clean = [] (float& v, float fallback) { v = finiteOr (v, fallback); };
+    clean (p.mix, defaults.mix);
+    clean (p.predelayMs, defaults.predelayMs);
+    clean (p.decaySeconds, defaults.decaySeconds);
+    clean (p.size, defaults.size);
+    clean (p.attack, defaults.attack);
+    clean (p.earlyDiffusion, defaults.earlyDiffusion);
+    clean (p.lateDiffusion, defaults.lateDiffusion);
+    clean (p.modRateHz, defaults.modRateHz);
+    clean (p.modDepth, defaults.modDepth);
+    clean (p.highCutHz, defaults.highCutHz);
+    clean (p.lowCutHz, defaults.lowCutHz);
+    clean (p.bassMult, defaults.bassMult);
+    clean (p.bassXoverHz, defaults.bassXoverHz);
+    clean (p.highShelfDb, defaults.highShelfDb);
+    clean (p.highFreqHz, defaults.highFreqHz);
+    clean (p.width, defaults.width);
     p.mode = (gr::Mode) juce::jlimit (0, (int) gr::Mode::count - 1, juce::roundToInt (raw.mode->load()));
     p.color = (gr::Color) juce::jlimit (0, (int) gr::Color::count - 1, juce::roundToInt (raw.color->load()));
     return p;
@@ -207,6 +247,9 @@ void GoodReverbProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
 
     engine.setParams (currentParams());
 
+    if (resetPending.exchange (false))
+        engine.reset();
+
     if (numOut >= 2)
     {
         if (numIn == 1)
@@ -229,9 +272,26 @@ void GoodReverbProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     }
 }
 
+void GoodReverbProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    // Pass the dry signal through (keeping mono input centred on both outputs), and
+    // start from silence when un-bypassed instead of replaying the frozen tail.
+    const int numIn = getTotalNumInputChannels();
+    const int numOut = getTotalNumOutputChannels();
+    const int numSamples = buffer.getNumSamples();
+    if (numIn == 1 && numOut >= 2)
+        buffer.copyFrom (1, 0, buffer, 0, 0, numSamples);
+    const int firstSilent = (numIn == 1 && numOut >= 2) ? 2 : numIn;
+    for (int ch = firstSilent; ch < numOut; ++ch)
+        buffer.clear (ch, 0, numSamples);
+    resetPending = true;
+}
+
 double GoodReverbProcessor::getTailLengthSeconds() const
 {
-    return (double) raw.decay->load() * 1.5 + (double) raw.predelay->load() * 0.001;
+    // The longest-decaying band sets the tail: Bass Mult can stretch the lows up to 4x.
+    const double decay = (double) raw.decay->load() * juce::jmax (1.0, (double) raw.bassMult->load());
+    return decay * 1.2 + (double) raw.predelay->load() * 0.001;
 }
 
 int GoodReverbProcessor::getNumPrograms() { return (int) factoryPresets().size(); }
@@ -266,6 +326,8 @@ void GoodReverbProcessor::setCurrentProgram (int index)
         ranged->setValueNotifyingHost (normalised);
         ranged->endChangeGesture();
     }
+
+    updateHostDisplay (juce::AudioProcessorListener::ChangeDetails().withProgramChanged (true));
 }
 
 void GoodReverbProcessor::getStateInformation (juce::MemoryBlock& destData)
@@ -284,6 +346,7 @@ void GoodReverbProcessor::setStateInformation (const void* data, int sizeInBytes
             auto state = juce::ValueTree::fromXml (*xml);
             currentProgram = state.getProperty ("program", 0);
             apvts.replaceState (state);
+            updateHostDisplay (juce::AudioProcessorListener::ChangeDetails().withProgramChanged (true));
         }
 }
 

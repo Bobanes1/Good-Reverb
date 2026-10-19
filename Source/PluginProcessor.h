@@ -38,7 +38,9 @@ public:
 
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using AudioProcessor::processBlock;
+    using AudioProcessor::processBlockBypassed;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -68,6 +70,7 @@ private:
     gr::ReverbEngine engine;
     juce::AudioBuffer<float> monoScratch;
     int currentProgram = 0;
+    std::atomic<bool> resetPending { false };
 
     struct RawParams
     {
